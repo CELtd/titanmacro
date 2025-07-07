@@ -119,15 +119,58 @@ def create_sidebar_config() -> tuple[SimulationConfig, object]:
         monthly_buyback_usd = mrr_usd * buyback_percentage
         st.caption(f"Monthly buyback budget: ${monthly_buyback_usd:,.0f}")
     
-    # MODULE 2: STAKING REWARDS
-    with st.sidebar.expander("Module 2: DPoS Staking Rewards", expanded=False):
-        st.markdown("**Exponentially decaying staking rewards for validators**")
+    # DYNAMIC ALLOCATION PERCENTAGES
+    with st.sidebar.expander("Dynamic Allocation Percentages", expanded=True):
+        st.markdown("**Configure the four dynamic allocation modules (max 40% total)**")
         
+        # Staking Budget
         staking_budget = st.slider(
             "Staking Budget (% of total supply)",
             min_value=0.05, max_value=0.40, value=0.15, step=0.01,
             help="Total percentage of token supply allocated to staking rewards over the entire emission schedule."
         )
+        
+        # Participant Budget
+        participant_budget = st.slider(
+            "Participant Budget (% of total supply)",
+            min_value=0.05, max_value=0.30, value=0.15, step=0.01,
+            help="Total percentage of token supply allocated to participant rewards."
+        )
+        
+        # Mining Reserve Budget
+        mining_reserve_budget = st.slider(
+            "Mining Reserve (% of total supply)",
+            min_value=0.0, max_value=0.20, value=0.05, step=0.01,
+            help="Percentage of token supply permanently locked for future mining incentives. This allocation is made immediately and never circulates."
+        )
+        
+        # Testnet Allocation Budget
+        testnet_allocation_budget = st.slider(
+            "Testnet Allocation (% of total supply)",
+            min_value=0.0, max_value=0.20, value=0.05, step=0.01,
+            help="Total percentage of token supply allocated to testnet incentives over the entire emission schedule."
+        )
+        
+        # Dynamic allocation validation
+        total_dynamic_allocation = staking_budget + participant_budget + mining_reserve_budget + testnet_allocation_budget
+        
+        if total_dynamic_allocation > 0.40:
+            st.error(f"⚠️ Total dynamic allocation ({total_dynamic_allocation*100:.1f}%) exceeds 40% limit!")
+            st.markdown(f"""
+            **Current allocations:**
+            - Staking: {staking_budget*100:.1f}%
+            - Participants: {participant_budget*100:.1f}%
+            - Mining Reserve: {mining_reserve_budget*100:.1f}%
+            - Testnet: {testnet_allocation_budget*100:.1f}%
+            """)
+            st.markdown(f"**Remaining for static allocation: {(1.0 - total_dynamic_allocation)*100:.1f}%**")
+        else:
+            st.success(f"✅ Total dynamic allocation: {total_dynamic_allocation*100:.1f}%")
+            st.markdown(f"**Remaining for static allocation: {(1.0 - total_dynamic_allocation)*100:.1f}%**")
+    
+    # MODULE 2: STAKING REWARDS CONFIGURATION
+    with st.sidebar.expander("Staking Rewards Configuration", expanded=False):
+        st.markdown("**Configure staking emission parameters**")
         
         staking_half_life = st.slider(
             "Staking Emission Half-life (months)",
@@ -141,15 +184,9 @@ def create_sidebar_config() -> tuple[SimulationConfig, object]:
         st.caption(f"Total staking budget: {staking_total_budget/1e6:.0f}M tokens")
         st.caption(f"Initial monthly emission: {initial_monthly_emission/1e6:.1f}M tokens")
     
-    # MODULE 3: PARTICIPANT REWARDS
-    with st.sidebar.expander("Module 3: Participant Rewards", expanded=False):
-        st.markdown("**FDV-milestone unlocked participant rewards**")
-        
-        participant_budget = st.slider(
-            "Participant Budget (% of total supply)",
-            min_value=0.05, max_value=0.30, value=0.15, step=0.01,
-            help="Total percentage of token supply allocated to participant rewards."
-        )
+    # MODULE 3: PARTICIPANT REWARDS CONFIGURATION
+    with st.sidebar.expander("Participant Rewards Configuration", expanded=False):
+        st.markdown("**Configure participant reward parameters and FDV milestones**")
         
         participant_half_life = st.slider(
             "Participant Emission Half-life (months)",
@@ -205,29 +242,9 @@ def create_sidebar_config() -> tuple[SimulationConfig, object]:
         participant_total_budget = total_supply * participant_budget
         st.caption(f"Total participant budget: {participant_total_budget/1e6:.0f}M tokens")
     
-    # MODULE 4: MINING RESERVE
-    with st.sidebar.expander("Mining Reserve", expanded=False):
-        st.markdown("**Permanently locked reserve for future mining incentives**")
-        
-        mining_reserve_budget = st.slider(
-            "Mining Reserve (% of total supply)",
-            min_value=0.0, max_value=0.20, value=0.05, step=0.01,
-            help="Percentage of token supply permanently locked for future mining incentives. This allocation is made immediately and never circulates."
-        )
-        
-        # Show mining reserve calculations
-        mining_reserve_total_budget = total_supply * mining_reserve_budget
-        st.caption(f"Total mining reserve: {mining_reserve_total_budget/1e6:.0f}M tokens (permanently locked)")
-    
-    # MODULE 5: TESTNET ALLOCATION
-    with st.sidebar.expander("Testnet Allocation", expanded=False):
-        st.markdown("**Exponentially decaying testnet incentives**")
-        
-        testnet_allocation_budget = st.slider(
-            "Testnet Allocation (% of total supply)",
-            min_value=0.0, max_value=0.20, value=0.05, step=0.01,
-            help="Total percentage of token supply allocated to testnet incentives over the entire emission schedule."
-        )
+    # MODULE 5: TESTNET ALLOCATION CONFIGURATION
+    with st.sidebar.expander("Testnet Allocation Configuration", expanded=False):
+        st.markdown("**Configure testnet emission parameters**")
         
         testnet_allocation_half_life = st.slider(
             "Testnet Emission Half-life (months)",
@@ -240,23 +257,6 @@ def create_sidebar_config() -> tuple[SimulationConfig, object]:
         initial_monthly_emission = testnet_allocation_total_budget * np.log(2) / testnet_allocation_half_life
         st.caption(f"Total testnet budget: {testnet_allocation_total_budget/1e6:.0f}M tokens")
         st.caption(f"Initial monthly emission: {initial_monthly_emission/1e6:.1f}M tokens")
-    
-    # DYNAMIC ALLOCATION VALIDATION
-    total_dynamic_allocation = staking_budget + participant_budget + mining_reserve_budget + testnet_allocation_budget
-    
-    if total_dynamic_allocation > 0.40:
-        st.sidebar.error(f"⚠️ Total dynamic allocation ({total_dynamic_allocation*100:.1f}%) exceeds 40% limit!")
-        st.sidebar.markdown(f"""
-        **Current allocations:**
-        - Staking: {staking_budget*100:.1f}%
-        - Participants: {participant_budget*100:.1f}%
-        - Mining Reserve: {mining_reserve_budget*100:.1f}%
-        - Testnet: {testnet_allocation_budget*100:.1f}%
-        """)
-        st.sidebar.markdown(f"**Remaining for static allocation: {(1.0 - total_dynamic_allocation)*100:.1f}%**")
-    else:
-        st.sidebar.success(f"✅ Total dynamic allocation: {total_dynamic_allocation*100:.1f}%")
-        st.sidebar.markdown(f"**Remaining for static allocation: {(1.0 - total_dynamic_allocation)*100:.1f}%**")
     
     # Create configuration object
     config = SimulationConfig(
