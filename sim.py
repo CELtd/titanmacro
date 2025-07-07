@@ -28,7 +28,7 @@ class SimulationConfig:
     worker_retention_rate: float = 0.00  # Percentage of bought tokens retained (not redistributed)
     
     # Module 2 - DPoS Staking Rewards
-    staking_budget_percentage: float = 0.20  # Percentage of total supply allocated to staking
+    staking_budget_percentage: float = 0.15  # Percentage of total supply allocated to staking
     staking_half_life_months: float = 36  # Half-life for exponential decay in months
     
     # Staking percent (fraction of circulating supply staked)
@@ -38,16 +38,69 @@ class SimulationConfig:
     participant_budget_percentage: float = 0.15  # Percentage of total supply for participant rewards
     participant_half_life_months: float = 48  # Half-life for exponential decay in months
     
+    # Module 4 - Mining Reserve
+    mining_reserve_percentage: float = 0.05  # Percentage of total supply for mining reserve
+    mining_reserve_half_life_months: float = 60  # Half-life for exponential decay in months
+    
+    # Module 5 - Testnet Allocation
+    testnet_allocation_percentage: float = 0.05  # Percentage of total supply for testnet allocation
+    testnet_allocation_half_life_months: float = 72  # Half-life for exponential decay in months
+    
     # FDV Milestones for Module 3 unlocks
     fdv_milestones: List[float] = None  # FDV thresholds for unlocking tokens
     unlock_percentages: List[float] = None  # Percentage of total budget unlocked at each milestone
     
     def __post_init__(self):
-        """Set default milestone values if not provided"""
+        """Set default milestone values if not provided and validate allocations"""
         if self.fdv_milestones is None:
             self.fdv_milestones = [100_000_000, 300_000_000, 1_000_000_000]  # $100M, $300M, $1B
         if self.unlock_percentages is None:
             self.unlock_percentages = [0.25, 0.50, 1.00]  # 25%, 50%, 100%
+        
+        # Validate that dynamic allocation buckets don't exceed 40%
+        self._validate_dynamic_allocations()
+    
+    def _validate_dynamic_allocations(self):
+        """Validate that the sum of dynamic allocation percentages doesn't exceed 40%"""
+        dynamic_allocations = [
+            self.staking_budget_percentage,
+            self.participant_budget_percentage,
+            self.mining_reserve_percentage,
+            self.testnet_allocation_percentage
+        ]
+        
+        total_dynamic_allocation = sum(dynamic_allocations)
+        max_allowed = 0.40  # 40%
+        
+        if total_dynamic_allocation > max_allowed:
+            raise ValueError(
+                f"Total dynamic allocation ({total_dynamic_allocation:.1%}) exceeds maximum allowed ({max_allowed:.1%}). "
+                f"Current allocations: Staking={self.staking_budget_percentage:.1%}, "
+                f"Participant={self.participant_budget_percentage:.1%}, "
+                f"MiningReserve={self.mining_reserve_percentage:.1%}, "
+                f"TestnetAllocation={self.testnet_allocation_percentage:.1%}"
+            )
+    
+    def get_dynamic_allocation_summary(self) -> Dict[str, float]:
+        """Get a summary of all dynamic allocation percentages"""
+        return {
+            'staking_budget_percentage': self.staking_budget_percentage,
+            'participant_budget_percentage': self.participant_budget_percentage,
+            'mining_reserve_percentage': self.mining_reserve_percentage,
+            'testnet_allocation_percentage': self.testnet_allocation_percentage,
+            'total_dynamic_allocation': sum([
+                self.staking_budget_percentage,
+                self.participant_budget_percentage,
+                self.mining_reserve_percentage,
+                self.testnet_allocation_percentage
+            ]),
+            'remaining_for_static': 1.0 - sum([
+                self.staking_budget_percentage,
+                self.participant_budget_percentage,
+                self.mining_reserve_percentage,
+                self.testnet_allocation_percentage
+            ])
+        }
 
 
 class PriceTrajectory(ABC):
@@ -154,7 +207,12 @@ class TokenomicsSimulation:
         """Load and process static vesting schedule data from quarterly milestones"""
         
         # Static vesting data provided (quarterly, cumulative)
-        data = {
+        # Total Static Vesting = 1,140,000,000
+        # Total Supply: 2,000,000,000
+        # Total Static Percentage: 57%
+        
+        # Base data up to Q20
+        base_data = {
             'Quarter': [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20],
             'Titan_Labs': [8333333,33333333,58333333,83333333,108333333,133333333,158333333,183333333,208333333,233333333,253333333,283333333,308333333,333333333,358333333,383333333,400000000,400000000,400000000,400000000,400000000],
             'Titan_Foundation': [4166667,16666667,29166667,41666667,54166667,66666667,79166667,91666667,104166667,116666667,129166667,141666667,154166667,166666667,179166667,191666667,200000000,200000000,200000000,200000000,200000000],
@@ -166,6 +224,38 @@ class TokenomicsSimulation:
             'Builder': [0,1500000,3000000,4500000,6000000,7500000,9000000,10500000,12000000,13500000,15000000,16500000,18000000,19500000,21000000,22500000,24000000,25500000,27000000,28500000,30000000],
             'RPGF': [0,1500000,3000000,4500000,6000000,7500000,9000000,10500000,12000000,13500000,15000000,16500000,18000000,19500000,21000000,22500000,24000000,25500000,27000000,28500000,30000000]
         }
+        
+        # Calculate how many more quarters we need
+        # Builder and RPGF need to reach 60,000,000 from 30,000,000
+        # They increase by 1,500,000 per quarter
+        # Additional quarters needed: (60,000,000 - 30,000,000) / 1,500,000 = 20 quarters
+        # So they will reach 60,000,000 at Q40
+        max_quarter = 40
+        
+        # Extend quarters list
+        quarters = list(range(max_quarter + 1))
+        
+        # Initialize extended data
+        data = {'Quarter': quarters}
+        
+        # Extend each bucket
+        for bucket in ['Titan_Labs', 'Titan_Foundation', 'Seed_Fundraising', 'SeriesA_Fundraising', 'Ecosystem', 'Testnet', 'Market_Making']:
+            # These buckets are already at their maximum values, so extend with the last value
+            last_value = base_data[bucket][-1]
+            data[bucket] = base_data[bucket] + [last_value] * (max_quarter - 20)
+        
+        # Extend Builder and RPGF with continued growth
+        for bucket in ['Builder', 'RPGF']:
+            extended_values = base_data[bucket].copy()
+            current_value = base_data[bucket][-1]  # 30,000,000 at Q20
+            
+            for quarter in range(21, max_quarter + 1):
+                current_value += 1500000
+                if current_value > 60000000:  # Cap at 60,000,000
+                    current_value = 60000000
+                extended_values.append(current_value)
+            
+            data[bucket] = extended_values
         
         return pd.DataFrame(data)
     
@@ -241,6 +331,8 @@ class TokenomicsSimulation:
         module3_emissions = np.zeros(months)
         module3_unlocked = np.zeros(months)
         module3_locked_balance = 0
+        mining_reserve_balance = np.zeros(months)  # NEW: Cumulative Mining Reserve balance
+        testnet_allocation_emissions = np.zeros(months)  # NEW: Testnet Allocation emissions
         
         # New: Staking percent vector and locked tokens tracking
         staking_percent_vec = np.full(months, self.config.staking_percent)
@@ -279,6 +371,8 @@ class TokenomicsSimulation:
         # Calculate module budgets
         module2_total_budget = self.config.total_supply * self.config.staking_budget_percentage
         module3_total_budget = self.config.total_supply * self.config.participant_budget_percentage
+        mining_reserve_total_budget = self.config.total_supply * self.config.mining_reserve_percentage
+        testnet_allocation_total_budget = self.config.total_supply * self.config.testnet_allocation_percentage
         
         # Main simulation loop - process each month
         for month in range(months):
@@ -286,10 +380,12 @@ class TokenomicsSimulation:
             prices[month] = self.price_trajectory.get_price(month)
             
             # Calculate total supply (static vesting + unlocked dynamic emissions)
+            # Note: mining_reserve is excluded as it's permanently locked
             total_supply_over_time[month] = (
                 total_static_monthly[month] +
                 np.sum(module2_emissions[:month+1]) +
-                np.sum(module3_unlocked[:month+1])
+                np.sum(module3_unlocked[:month+1]) +
+                np.sum(testnet_allocation_emissions[:month+1])
             )
             
             # Calculate Fully Diluted Valuation
@@ -350,6 +446,14 @@ class TokenomicsSimulation:
             
             module3_unlocked[month] = unlocked_this_month
             
+            # Track cumulative mining reserve balance (constant after month 0)
+            mining_reserve_balance[month] = mining_reserve_total_budget
+            
+            # Testnet Allocation (exponential decay, direct to circulation)
+            testnet_allocation_emissions[month] = self._calculate_exponential_decay_emission(
+                month, testnet_allocation_total_budget, self.config.testnet_allocation_half_life_months
+            )
+            
             # Calculate circulating supply
             if month == 0:
                 circulating_supply[month] = static_vesting_flow[month]
@@ -359,8 +463,10 @@ class TokenomicsSimulation:
             # Add dynamic emissions to circulation
             circulating_supply[month] += module2_emissions[month]  # Staking rewards
             circulating_supply[month] += module3_unlocked[month]  # Unlocked participant rewards
+            circulating_supply[month] += testnet_allocation_emissions[month]  # Testnet Allocation (direct to circulation)
             circulating_supply[month] += module1_redistributions[month]  # Redistributed buybacks
             circulating_supply[month] += module1_protocol_inflow[month]  # Protocol inflow (remains circulating)
+            # Note: mining_reserve_allocation (Mining Reserve) are locked and never enter circulation
             
             # Subtract tokens retained by workers (temporarily out of circulation)
             circulating_supply[month] -= module1_buybacks[month] * self.config.worker_retention_rate
@@ -377,10 +483,12 @@ class TokenomicsSimulation:
             static_vesting_flow +
             module2_emissions +
             module3_unlocked +
+            testnet_allocation_emissions +
             module1_redistributions +
             module1_protocol_inflow -
             module1_burned -
             (module1_buybacks * self.config.worker_retention_rate)
+            # Note: mining_reserve_allocation (Mining Reserve) are locked and don't affect net flow
         )
         
         # Store comprehensive results
@@ -402,6 +510,8 @@ class TokenomicsSimulation:
             'module2_emissions': module2_emissions,
             'module3_emissions': module3_emissions,
             'module3_unlocked': module3_unlocked,
+            'mining_reserve_balance': mining_reserve_balance,  # NEW: Cumulative Mining Reserve balance
+            'testnet_allocation_emissions': testnet_allocation_emissions,  # NEW: Testnet Allocation
             
             # Locked tokens
             'staking_percent_vec': staking_percent_vec,
@@ -443,5 +553,7 @@ class TokenomicsSimulation:
             'total_buybacks': np.sum(self.results['module1_buybacks']),
             'total_staking_emissions': np.sum(self.results['module2_emissions']),
             'total_participant_unlocked': np.sum(self.results['module3_unlocked']),
+            'total_mining_reserve_allocation': self.results['mining_reserve_balance'][final_month],
+            'total_testnet_allocation_emissions': np.sum(self.results['testnet_allocation_emissions']),
             'module3_still_locked': self.results['module3_locked_balance_final']
         }

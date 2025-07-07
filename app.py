@@ -125,7 +125,7 @@ def create_sidebar_config() -> tuple[SimulationConfig, object]:
         
         staking_budget = st.slider(
             "Staking Budget (% of total supply)",
-            min_value=0.05, max_value=0.50, value=0.20, step=0.01,
+            min_value=0.05, max_value=0.40, value=0.15, step=0.01,
             help="Total percentage of token supply allocated to staking rewards over the entire emission schedule."
         )
         
@@ -205,6 +205,59 @@ def create_sidebar_config() -> tuple[SimulationConfig, object]:
         participant_total_budget = total_supply * participant_budget
         st.caption(f"Total participant budget: {participant_total_budget/1e6:.0f}M tokens")
     
+    # MODULE 4: MINING RESERVE
+    with st.sidebar.expander("Mining Reserve", expanded=False):
+        st.markdown("**Permanently locked reserve for future mining incentives**")
+        
+        mining_reserve_budget = st.slider(
+            "Mining Reserve (% of total supply)",
+            min_value=0.0, max_value=0.20, value=0.05, step=0.01,
+            help="Percentage of token supply permanently locked for future mining incentives. This allocation is made immediately and never circulates."
+        )
+        
+        # Show mining reserve calculations
+        mining_reserve_total_budget = total_supply * mining_reserve_budget
+        st.caption(f"Total mining reserve: {mining_reserve_total_budget/1e6:.0f}M tokens (permanently locked)")
+    
+    # MODULE 5: TESTNET ALLOCATION
+    with st.sidebar.expander("Testnet Allocation", expanded=False):
+        st.markdown("**Exponentially decaying testnet incentives**")
+        
+        testnet_allocation_budget = st.slider(
+            "Testnet Allocation (% of total supply)",
+            min_value=0.0, max_value=0.20, value=0.05, step=0.01,
+            help="Total percentage of token supply allocated to testnet incentives over the entire emission schedule."
+        )
+        
+        testnet_allocation_half_life = st.slider(
+            "Testnet Emission Half-life (months)",
+            min_value=12, max_value=84, value=72, step=6,
+            help="Half-life for exponential decay of testnet allocation emissions."
+        )
+        
+        # Show testnet allocation calculations
+        testnet_allocation_total_budget = total_supply * testnet_allocation_budget
+        initial_monthly_emission = testnet_allocation_total_budget * np.log(2) / testnet_allocation_half_life
+        st.caption(f"Total testnet budget: {testnet_allocation_total_budget/1e6:.0f}M tokens")
+        st.caption(f"Initial monthly emission: {initial_monthly_emission/1e6:.1f}M tokens")
+    
+    # DYNAMIC ALLOCATION VALIDATION
+    total_dynamic_allocation = staking_budget + participant_budget + mining_reserve_budget + testnet_allocation_budget
+    
+    if total_dynamic_allocation > 0.40:
+        st.sidebar.error(f"⚠️ Total dynamic allocation ({total_dynamic_allocation*100:.1f}%) exceeds 40% limit!")
+        st.sidebar.markdown(f"""
+        **Current allocations:**
+        - Staking: {staking_budget*100:.1f}%
+        - Participants: {participant_budget*100:.1f}%
+        - Mining Reserve: {mining_reserve_budget*100:.1f}%
+        - Testnet: {testnet_allocation_budget*100:.1f}%
+        """)
+        st.sidebar.markdown(f"**Remaining for static allocation: {(1.0 - total_dynamic_allocation)*100:.1f}%**")
+    else:
+        st.sidebar.success(f"✅ Total dynamic allocation: {total_dynamic_allocation*100:.1f}%")
+        st.sidebar.markdown(f"**Remaining for static allocation: {(1.0 - total_dynamic_allocation)*100:.1f}%**")
+    
     # Create configuration object
     config = SimulationConfig(
         total_supply=int(total_supply),
@@ -216,6 +269,10 @@ def create_sidebar_config() -> tuple[SimulationConfig, object]:
         staking_half_life_months=staking_half_life,
         participant_budget_percentage=participant_budget,
         participant_half_life_months=participant_half_life,
+        mining_reserve_percentage=mining_reserve_budget,
+        mining_reserve_half_life_months=60,  # Not used since it's immediate allocation
+        testnet_allocation_percentage=testnet_allocation_budget,
+        testnet_allocation_half_life_months=testnet_allocation_half_life,
         fdv_milestones=fdv_milestones,
         unlock_percentages=unlock_percentages,
         staking_percent=staking_percent
@@ -612,12 +669,15 @@ def main():
                 st.markdown("**Module Budgets**")
                 st.write(f"Staking: {config.staking_budget_percentage*100:.1f}% ({config.total_supply*config.staking_budget_percentage/1e6:.0f}M tokens)")
                 st.write(f"Participants: {config.participant_budget_percentage*100:.1f}% ({config.total_supply*config.participant_budget_percentage/1e6:.0f}M tokens)")
+                st.write(f"Mining Reserve: {config.mining_reserve_percentage*100:.1f}% ({config.total_supply*config.mining_reserve_percentage/1e6:.0f}M tokens)")
+                st.write(f"Testnet: {config.testnet_allocation_percentage*100:.1f}% ({config.total_supply*config.testnet_allocation_percentage/1e6:.0f}M tokens)")
                 st.write(f"Monthly Revenue: ${config.mrr_usd:,.0f}")
             
             with col3:
                 st.markdown("**Half-lives**")
                 st.write(f"Staking: {config.staking_half_life_months:.0f} months")
                 st.write(f"Participants: {config.participant_half_life_months:.0f} months")
+                st.write(f"Testnet: {config.testnet_allocation_half_life_months:.0f} months")
                 st.write(f"Worker Retention: {config.worker_retention_rate*100:.1f}%")
         
         # Display charts
