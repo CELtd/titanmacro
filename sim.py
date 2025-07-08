@@ -25,7 +25,6 @@ class SimulationConfig:
     # Module 1 - Revenue Buybacks
     mrr_usd: float = 100_000  # Monthly recurring revenue in USD
     buyback_percentage: float = 0.80  # Percentage of revenue used for buybacks
-    worker_retention_rate: float = 0.00  # Percentage of bought tokens retained (not redistributed)
     
     # Module 2 - DPoS Staking Rewards
     staking_budget_percentage: float = 0.15  # Percentage of total supply allocated to staking
@@ -340,6 +339,12 @@ class TokenomicsSimulation:
         module3_locked_tokens = np.zeros(months)
         total_locked_tokens = np.zeros(months)
         
+        # NEW: Buyback/burn constraint tracking
+        buyback_constraint_violations = np.zeros(months, dtype=bool)
+        burn_constraint_violations = np.zeros(months, dtype=bool)
+        max_buyable_tokens = np.zeros(months)
+        max_burnable_tokens = np.zeros(months)
+        
         # Track which FDV milestones have been reached
         module3_unlock_reached = [False] * len(self.config.fdv_milestones)
         
@@ -404,8 +409,8 @@ class TokenomicsSimulation:
             module1_buybacks[month] = tokens_bought
             module1_protocol_inflow[month] = tokens_protocol
             module1_burned[month] = tokens_burned
-            # Redistribute tokens not retained by workers
-            module1_redistributions[month] = tokens_bought * (1 - self.config.worker_retention_rate)
+            # Redistribute tokens to workers (80% of bought tokens)
+            module1_redistributions[month] = tokens_bought * 0.80
             
             # MODULE 2: DPoS staking rewards (exponential decay)
             module2_emissions[month] = self._calculate_exponential_decay_emission(
@@ -454,7 +459,7 @@ class TokenomicsSimulation:
                 month, testnet_allocation_total_budget, self.config.testnet_allocation_half_life_months
             )
             
-            # Calculate circulating supply
+            # Calculate circulating supply and check constraints as we build it
             if month == 0:
                 circulating_supply[month] = static_vesting_flow[month]
             else:
@@ -464,32 +469,33 @@ class TokenomicsSimulation:
             circulating_supply[month] += module2_emissions[month]  # Staking rewards
             circulating_supply[month] += module3_unlocked[month]  # Unlocked participant rewards
             circulating_supply[month] += testnet_allocation_emissions[month]  # Testnet Allocation (direct to circulation)
-            circulating_supply[month] += module1_redistributions[month]  # Redistributed buybacks
-            circulating_supply[month] += module1_protocol_inflow[month]  # Protocol inflow (remains circulating)
-            # Note: mining_reserve_allocation (Mining Reserve) are locked and never enter circulation
-            
-            # Subtract tokens retained by workers (temporarily out of circulation)
-            circulating_supply[month] -= module1_buybacks[month] * self.config.worker_retention_rate
+            # Module1 flows: tokens are bought from circulation, then redistributed back
+            # Net effect: only burned tokens are permanently removed from circulation
             # Subtract burned tokens (permanently removed)
             circulating_supply[month] -= module1_burned[month]
+            # Note: redistributed tokens (80%) and protocol tokens (10%) remain in circulation
+            # since they were bought from circulation and redistributed back
+            
+            # Check buyback/burn constraints against available circulating supply BEFORE module1 flows
+            available_circulating = circulating_supply[month]
+            max_buyable_tokens[month] = available_circulating
+            max_burnable_tokens[month] = available_circulating
+            
+            buyback_constraint_violations[month] = tokens_bought > available_circulating
+            burn_constraint_violations[month] = tokens_burned > available_circulating
             
             # Calculate staked tokens for this month (after all emissions)
             staked_tokens[month] = circulating_supply[month] * staking_percent_vec[month]
             # Total locked = staked + module3 locked
             total_locked_tokens[month] = staked_tokens[month] + module3_locked_tokens[month]
         
-        # Calculate net flow (positive = net emission, negative = net sink)
-        net_flow = (
-            static_vesting_flow +
-            module2_emissions +
-            module3_unlocked +
-            testnet_allocation_emissions +
-            module1_redistributions +
-            module1_protocol_inflow -
-            module1_burned -
-            (module1_buybacks * self.config.worker_retention_rate)
-            # Note: mining_reserve_allocation (Mining Reserve) are locked and don't affect net flow
-        )
+        # Calculate net flow as derivative of circulating supply (positive = net emission, negative = net sink)
+        net_flow = np.zeros(months)
+        for month in range(months):
+            if month == 0:
+                net_flow[month] = circulating_supply[month]
+            else:
+                net_flow[month] = circulating_supply[month] - circulating_supply[month-1]
         
         # Store comprehensive results
         self.results = {
@@ -518,6 +524,12 @@ class TokenomicsSimulation:
             'staked_tokens': staked_tokens,
             'module3_locked_tokens': module3_locked_tokens,
             'total_locked_tokens': total_locked_tokens,
+            
+            # NEW: Buyback/burn constraint tracking
+            'buyback_constraint_violations': buyback_constraint_violations,
+            'burn_constraint_violations': burn_constraint_violations,
+            'max_buyable_tokens': max_buyable_tokens,
+            'max_burnable_tokens': max_burnable_tokens,
             
             # State variables
             'module3_locked_balance_final': module3_locked_balance,
@@ -556,4 +568,126 @@ class TokenomicsSimulation:
             'total_mining_reserve_allocation': self.results['mining_reserve_balance'][final_month],
             'total_testnet_allocation_emissions': np.sum(self.results['testnet_allocation_emissions']),
             'module3_still_locked': self.results['module3_locked_balance_final']
+        }
+    
+    def analyze_buyback_constraints(self) -> Dict[str, Any]:
+        """
+        Analyze buyback and burn constraint violations and calculate maximum sustainable revenue
+        
+        Returns:
+            Dictionary containing constraint analysis results
+        """
+        if not self.results:
+            raise ValueError("Simulation must be run before analyzing constraints")
+        
+        # Find months with constraint violations
+        buyback_violation_months = np.where(self.results['buyback_constraint_violations'])[0]
+        burn_violation_months = np.where(self.results['burn_constraint_violations'])[0]
+        
+        # Calculate maximum sustainable revenue for each month
+        max_sustainable_revenue = []
+        for month in range(len(self.results['months'])):
+            if self.results['prices'][month] > 0:
+                # Calculate how much USD revenue could be converted to tokens
+                max_tokens = self.results['max_buyable_tokens'][month]
+                max_revenue_for_buybacks = max_tokens * self.results['prices'][month] / self.config.buyback_percentage
+                max_revenue_for_burns = max_tokens * self.results['prices'][month] / 0.10  # 10% of revenue
+                # Take the minimum (most restrictive constraint)
+                max_sustainable_revenue.append(min(max_revenue_for_buybacks, max_revenue_for_burns))
+            else:
+                max_sustainable_revenue.append(0)
+        
+        max_sustainable_revenue = np.array(max_sustainable_revenue)
+        
+        # Find the minimum sustainable revenue (bottleneck)
+        min_sustainable_revenue = np.min(max_sustainable_revenue[max_sustainable_revenue > 0]) if np.any(max_sustainable_revenue > 0) else 0
+        
+        # NEW: Buy pressure analysis
+        buy_pressure_metrics = self._calculate_buy_pressure_metrics()
+        
+        return {
+            'buyback_violation_months': buyback_violation_months.tolist(),
+            'burn_violation_months': burn_violation_months.tolist(),
+            'total_buyback_violations': len(buyback_violation_months),
+            'total_burn_violations': len(burn_violation_months),
+            'max_sustainable_revenue': max_sustainable_revenue,
+            'min_sustainable_revenue': min_sustainable_revenue,
+            'current_revenue': self.config.mrr_usd,
+            'revenue_constrained': self.config.mrr_usd > min_sustainable_revenue if min_sustainable_revenue > 0 else False,
+            'constraint_bottleneck_month': np.argmin(max_sustainable_revenue) if np.any(max_sustainable_revenue > 0) else None,
+            'buy_pressure_metrics': buy_pressure_metrics
+        }
+    
+    def _calculate_buy_pressure_metrics(self) -> Dict[str, Any]:
+        """
+        Calculate buy pressure metrics to understand MRR's impact on token demand
+        
+        Returns:
+            Dictionary containing buy pressure analysis
+        """
+        if not self.results:
+            raise ValueError("Simulation must be run before calculating buy pressure metrics")
+        
+        months = len(self.results['months'])
+        
+        # Calculate monthly buy pressure metrics
+        monthly_buy_pressure = []
+        monthly_buyback_volume_usd = []
+        monthly_buyback_volume_tokens = []
+        monthly_buyback_percentage_of_supply = []
+        monthly_buyback_percentage_of_flow = []
+        
+        for month in range(months):
+            # Buyback volume in USD
+            buyback_usd = self.config.mrr_usd * self.config.buyback_percentage
+            monthly_buyback_volume_usd.append(buyback_usd)
+            
+            # Buyback volume in tokens
+            buyback_tokens = self.results['module1_buybacks'][month]
+            monthly_buyback_volume_tokens.append(buyback_tokens)
+            
+            # Buyback as percentage of circulating supply
+            circulating_supply = self.results['circulating_supply'][month]
+            buyback_pct_supply = (buyback_tokens / circulating_supply * 100) if circulating_supply > 0 else 0
+            monthly_buyback_percentage_of_supply.append(buyback_pct_supply)
+            
+            # Buyback as percentage of monthly net flow
+            net_flow = self.results['net_flow'][month]
+            buyback_pct_flow = (buyback_tokens / abs(net_flow) * 100) if abs(net_flow) > 0 else 0
+            monthly_buyback_percentage_of_flow.append(buyback_pct_flow)
+            
+            # Buy pressure score (combines volume and supply impact)
+            buy_pressure_score = buyback_pct_supply * (buyback_usd / 1000)  # Normalized by revenue scale
+            monthly_buy_pressure.append(buy_pressure_score)
+        
+        # Calculate summary statistics
+        avg_buyback_pct_supply = np.mean(monthly_buyback_percentage_of_supply)
+        max_buyback_pct_supply = np.max(monthly_buyback_percentage_of_supply)
+        avg_buy_pressure_score = np.mean(monthly_buy_pressure)
+        max_buy_pressure_score = np.max(monthly_buy_pressure)
+        
+        # Calculate total buyback impact over simulation
+        total_buyback_usd = np.sum(monthly_buyback_volume_usd)
+        total_buyback_tokens = np.sum(monthly_buyback_volume_tokens)
+        
+        # Calculate buyback efficiency (tokens bought per USD)
+        avg_buyback_efficiency = total_buyback_tokens / total_buyback_usd if total_buyback_usd > 0 else 0
+        
+        # Find peak buy pressure month
+        peak_buy_pressure_month = np.argmax(monthly_buy_pressure)
+        
+        return {
+            'monthly_buy_pressure': np.array(monthly_buy_pressure),
+            'monthly_buyback_volume_usd': np.array(monthly_buyback_volume_usd),
+            'monthly_buyback_volume_tokens': np.array(monthly_buyback_volume_tokens),
+            'monthly_buyback_percentage_of_supply': np.array(monthly_buyback_percentage_of_supply),
+            'monthly_buyback_percentage_of_flow': np.array(monthly_buyback_percentage_of_flow),
+            'avg_buyback_pct_supply': avg_buyback_pct_supply,
+            'max_buyback_pct_supply': max_buyback_pct_supply,
+            'avg_buy_pressure_score': avg_buy_pressure_score,
+            'max_buy_pressure_score': max_buy_pressure_score,
+            'total_buyback_usd': total_buyback_usd,
+            'total_buyback_tokens': total_buyback_tokens,
+            'avg_buyback_efficiency': avg_buyback_efficiency,
+            'peak_buy_pressure_month': peak_buy_pressure_month
         }
