@@ -49,12 +49,20 @@ class SimulationConfig:
     fdv_milestones: List[float] = None  # FDV thresholds for unlocking tokens
     unlock_percentages: List[float] = None  # Percentage of total budget unlocked at each milestone
     
+    # Static Vesting Configuration
+    static_vesting_data: Dict[str, List[int]] = None  # Custom static vesting data
+    use_custom_static_vesting: bool = False  # Whether to use custom data or default
+    
     def __post_init__(self):
         """Set default milestone values if not provided and validate allocations"""
         if self.fdv_milestones is None:
             self.fdv_milestones = [100_000_000, 300_000_000, 1_000_000_000]  # $100M, $300M, $1B
         if self.unlock_percentages is None:
             self.unlock_percentages = [0.25, 0.50, 1.00]  # 25%, 50%, 100%
+        
+        # Validate custom static vesting data if provided
+        if self.use_custom_static_vesting and self.static_vesting_data is not None:
+            self.validate_static_vesting_data(self.static_vesting_data)
         
         # Validate that dynamic allocation buckets don't exceed 40%
         self._validate_dynamic_allocations()
@@ -100,6 +108,70 @@ class SimulationConfig:
                 self.testnet_allocation_percentage
             ])
         }
+    
+    @staticmethod
+    def get_default_static_vesting_data() -> Dict[str, List[int]]:
+        """Get the default static vesting data structure"""
+        return {
+            'Quarter': [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20],
+            'Titan_Labs': [8333333,33333333,58333333,83333333,108333333,133333333,158333333,183333333,208333333,233333333,253333333,283333333,308333333,333333333,358333333,383333333,400000000,400000000,400000000,400000000,400000000],
+            'Titan_Foundation': [4166667,16666667,29166667,41666667,54166667,66666667,79166667,91666667,104166667,116666667,129166667,141666667,154166667,166666667,179166667,191666667,200000000,200000000,200000000,200000000,200000000],
+            'Seed_Fundraising': [944444,3777778,6611111,9444444,12277778,15111111,17944444,20777778,23611111,26444444,29277778,32111111,34000000,34000000,34000000,34000000,34000000,34000000,34000000,34000000,34000000],
+            'SeriesA_Fundraising': [4611111,18444444,32277778,46111111,59944444,73777778,87611111,101444444,115277778,129111111,142944444,156777778,166000000,166000000,166000000,166000000,166000000,166000000,166000000,166000000,166000000],
+            'Ecosystem': [2083333,8333333,14583333,20833333,27083333,33333333,39583333,45833333,52083333,58333333,64583333,70833333,77083333,83333333,89583333,95833333,100000000,100000000,100000000,100000000,100000000],
+            'Testnet': [7500000,30000000,52500000,75000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000],
+            'Market_Making': [7500000,30000000,52500000,75000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000],
+            'Builder': [0,1500000,3000000,4500000,6000000,7500000,9000000,10500000,12000000,13500000,15000000,16500000,18000000,19500000,21000000,22500000,24000000,25500000,27000000,28500000,30000000],
+            'RPGF': [0,1500000,3000000,4500000,6000000,7500000,9000000,10500000,12000000,13500000,15000000,16500000,18000000,19500000,21000000,22500000,24000000,25500000,27000000,28500000,30000000]
+        }
+    
+    @staticmethod
+    def validate_static_vesting_data(data: Dict[str, List[int]]) -> bool:
+        """
+        Validate custom static vesting data structure
+        
+        Args:
+            data: Dictionary containing static vesting data
+            
+        Returns:
+            True if valid, raises ValueError if invalid
+        """
+        required_keys = ['Quarter', 'Titan_Labs', 'Titan_Foundation', 'Seed_Fundraising', 
+                        'SeriesA_Fundraising', 'Ecosystem', 'Testnet', 'Market_Making', 'Builder', 'RPGF']
+        
+        # Check all required keys exist
+        for key in required_keys:
+            if key not in data:
+                raise ValueError(f"Missing required key: {key}")
+        
+        # Check all lists have the same length
+        lengths = [len(data[key]) for key in required_keys]
+        if len(set(lengths)) != 1:
+            raise ValueError(f"All vesting schedules must have the same length. Found lengths: {lengths}")
+        
+        # Check quarters start from 0 and are sequential
+        quarters = data['Quarter']
+        if quarters[0] != 0:
+            raise ValueError("Quarters must start from 0")
+        
+        for i in range(1, len(quarters)):
+            if quarters[i] != quarters[i-1] + 1:
+                raise ValueError(f"Quarters must be sequential. Found gap at index {i}")
+        
+        # Check all values are non-negative
+        for key in required_keys:
+            if key != 'Quarter':
+                if any(val < 0 for val in data[key]):
+                    raise ValueError(f"All values in {key} must be non-negative")
+        
+        # Check values are monotonically increasing (cumulative)
+        for key in required_keys:
+            if key != 'Quarter':
+                for i in range(1, len(data[key])):
+                    if data[key][i] < data[key][i-1]:
+                        raise ValueError(f"Values in {key} must be monotonically increasing (cumulative)")
+        
+        return True
 
 
 class PriceTrajectory(ABC):
@@ -205,24 +277,16 @@ class TokenomicsSimulation:
     def _load_static_vesting_data(self) -> pd.DataFrame:
         """Load and process static vesting schedule data from quarterly milestones"""
         
+        # Use custom static vesting data if provided, otherwise use default
+        if self.config.use_custom_static_vesting and self.config.static_vesting_data is not None:
+            base_data = self.config.static_vesting_data
+        else:
+            base_data = self.config.get_default_static_vesting_data()
+        
         # Static vesting data provided (quarterly, cumulative)
         # Total Static Vesting = 1,140,000,000
         # Total Supply: 2,000,000,000
         # Total Static Percentage: 57%
-        
-        # Base data up to Q20
-        base_data = {
-            'Quarter': [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20],
-            'Titan_Labs': [8333333,33333333,58333333,83333333,108333333,133333333,158333333,183333333,208333333,233333333,253333333,283333333,308333333,333333333,358333333,383333333,400000000,400000000,400000000,400000000,400000000],
-            'Titan_Foundation': [4166667,16666667,29166667,41666667,54166667,66666667,79166667,91666667,104166667,116666667,129166667,141666667,154166667,166666667,179166667,191666667,200000000,200000000,200000000,200000000,200000000],
-            'Seed_Fundraising': [944444,3777778,6611111,9444444,12277778,15111111,17944444,20777778,23611111,26444444,29277778,32111111,34000000,34000000,34000000,34000000,34000000,34000000,34000000,34000000,34000000],
-            'SeriesA_Fundraising': [4611111,18444444,32277778,46111111,59944444,73777778,87611111,101444444,115277778,129111111,142944444,156777778,166000000,166000000,166000000,166000000,166000000,166000000,166000000,166000000,166000000],
-            'Ecosystem': [2083333,8333333,14583333,20833333,27083333,33333333,39583333,45833333,52083333,58333333,64583333,70833333,77083333,83333333,89583333,95833333,100000000,100000000,100000000,100000000,100000000],
-            'Testnet': [7500000,30000000,52500000,75000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000],
-            'Market_Making': [7500000,30000000,52500000,75000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000,90000000],
-            'Builder': [0,1500000,3000000,4500000,6000000,7500000,9000000,10500000,12000000,13500000,15000000,16500000,18000000,19500000,21000000,22500000,24000000,25500000,27000000,28500000,30000000],
-            'RPGF': [0,1500000,3000000,4500000,6000000,7500000,9000000,10500000,12000000,13500000,15000000,16500000,18000000,19500000,21000000,22500000,24000000,25500000,27000000,28500000,30000000]
-        }
         
         # Calculate how many more quarters we need
         # Builder and RPGF need to reach 60,000,000 from 30,000,000

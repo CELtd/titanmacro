@@ -34,7 +34,7 @@ def create_sidebar_config() -> tuple[SimulationConfig, object, float]:
     Create sidebar configuration interface with organized parameter groups
     
     Returns:
-        Tuple of (SimulationConfig, PriceTrajectory)
+        Tuple of (SimulationConfig, PriceTrajectory, excess_buyback_percentage)
     """
     st.sidebar.title("Simulation Configuration")
     st.sidebar.markdown("Adjust parameters to explore different tokenomics scenarios")
@@ -261,6 +261,10 @@ def create_sidebar_config() -> tuple[SimulationConfig, object, float]:
         st.caption(f"Total testnet budget: {testnet_allocation_total_budget/1e6:.0f}M tokens")
         st.caption(f"Initial monthly emission: {initial_monthly_emission/1e6:.1f}M tokens")
     
+    # Remove static vesting configuration from sidebar - will be in separate tab
+    static_vesting_data = None
+    use_custom_static_vesting = False
+    
     # FIRST YEAR ANALYSIS CONFIGURATION
     with st.sidebar.expander("First Year Analysis Configuration", expanded=False):
         st.markdown("**Configure assumptions for first year cumulative analysis**")
@@ -287,7 +291,9 @@ def create_sidebar_config() -> tuple[SimulationConfig, object, float]:
         testnet_allocation_half_life_months=testnet_allocation_half_life,
         fdv_milestones=fdv_milestones,
         unlock_percentages=unlock_percentages,
-        staking_percent=staking_percent
+        staking_percent=staking_percent,
+        static_vesting_data=static_vesting_data,
+        use_custom_static_vesting=use_custom_static_vesting
     )
     
     return config, price_trajectory, excess_buyback_percentage
@@ -930,6 +936,148 @@ def create_charts(results: dict, excess_buyback_percentage: float = 1.0) -> None
             mime="text/csv"
         )
 
+def create_static_vesting_tab():
+    """Create the static vesting configuration tab"""
+    
+    st.header("Static Vesting Configuration")
+    st.markdown("""
+    **Configure static vesting schedules for core stakeholders**
+    
+    This table shows the cumulative token allocation for each stakeholder category by quarter.
+    Values represent the total tokens vested by each quarter (cumulative).
+    """)
+    
+    # Get default data for reference
+    default_data = SimulationConfig.get_default_static_vesting_data()
+    
+    # Initialize session state for static vesting data
+    if 'static_vesting_data' not in st.session_state:
+        st.session_state.static_vesting_data = default_data.copy()
+    
+    # Display current data summary
+    st.subheader("Static Vesting Summary")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Allocation by Category:**")
+        total_by_category = {}
+        for key in default_data.keys():
+            if key != 'Quarter':
+                total_by_category[key] = st.session_state.static_vesting_data[key][-1] / 1e6  # Convert to millions
+        
+        for category, total in total_by_category.items():
+            st.caption(f"{category}: {total:.0f}M tokens")
+    
+    with col2:
+        total_static = sum(total_by_category.values())
+        st.metric(
+            "Total Static Allocation",
+            f"{total_static:.0f}M tokens",
+            f"{total_static/2000*100:.1f}% of supply"
+        )
+    
+    # Add option to reset to defaults
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        if st.button("Reset to Default Values", type="secondary"):
+            st.session_state.static_vesting_data = default_data.copy()
+            st.rerun()
+    
+    with col2:
+        st.caption("Click to restore the original default vesting schedules")
+    
+    # Show data editor
+    st.subheader("Edit Static Vesting Data")
+    st.caption("Values are cumulative (total tokens vested by each quarter). All schedules must have the same length.")
+    
+    # Create DataFrame for editing with formatted numbers
+    df_data = {}
+    for key in default_data.keys():
+        if key == 'Quarter':
+            df_data[key] = st.session_state.static_vesting_data[key]
+        else:
+            df_data[key] = [f"{val:,}" for val in st.session_state.static_vesting_data[key]]
+    
+    vesting_df = pd.DataFrame(df_data)
+    
+    # Use Streamlit's data editor
+    edited_df = st.data_editor(
+        vesting_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="static_vesting_editor_tab"
+    )
+    
+    # Convert back to the expected format and validate
+    try:
+        edited_data = {}
+        edited_data['Quarter'] = [int(q) for q in edited_df['Quarter']]
+        
+        for key in default_data.keys():
+            if key != 'Quarter':
+                # Convert comma-separated strings back to integers
+                edited_data[key] = []
+                for val_str in edited_df[key]:
+                    if isinstance(val_str, str):
+                        val_str = val_str.replace(',', '')
+                    edited_data[key].append(int(val_str))
+        
+        # Validate the edited data
+        SimulationConfig.validate_static_vesting_data(edited_data)
+        
+        # Update session state with validated data
+        st.session_state.static_vesting_data = edited_data
+        
+        st.success("✅ Static vesting data is valid and saved")
+        
+        # Show validation summary
+        st.info("""
+        **Data Validation Passed:**
+        - All required categories are present
+        - All schedules have the same length
+        - Quarters are sequential starting from 0
+        - All values are non-negative
+        - Values are monotonically increasing (cumulative)
+        """)
+        
+    except ValueError as e:
+        st.error(f"❌ Validation error: {str(e)}")
+        st.warning("Please fix the validation errors above. The simulation will use the last valid data.")
+    
+    # Show data visualization
+    st.subheader("Static Vesting Visualization")
+    
+    # Create a simple visualization of the vesting schedules
+    viz_data = []
+    for i, quarter in enumerate(st.session_state.static_vesting_data['Quarter']):
+        for key in default_data.keys():
+            if key != 'Quarter':
+                viz_data.append({
+                    'Quarter': quarter,
+                    'Category': key,
+                    'Tokens (Millions)': st.session_state.static_vesting_data[key][i] / 1e6
+                })
+    
+    viz_df = pd.DataFrame(viz_data)
+    
+    # Create line chart
+    chart = alt.Chart(viz_df).mark_line().encode(
+        x=alt.X('Quarter:Q', title='Quarter'),
+        y=alt.Y('Tokens (Millions):Q', title='Cumulative Tokens (Millions)'),
+        color=alt.Color('Category:N', title='Stakeholder Category'),
+        tooltip=[
+            alt.Tooltip('Quarter:Q', title='Quarter'),
+            alt.Tooltip('Category:N', title='Category'),
+            alt.Tooltip('Tokens (Millions):Q', title='Cumulative Tokens (M)', format='.1f')
+        ]
+    ).properties(
+        height=400,
+        title='Static Vesting Schedules Over Time'
+    ).interactive()
+    
+    st.altair_chart(chart, use_container_width=True)
+
+
 def main():
     """Main Streamlit application"""
     
@@ -942,134 +1090,146 @@ def main():
     how token supply evolves over time. Adjust parameters in the sidebar to explore different scenarios.
     """)
     
-    # Configuration sidebar
-    config, price_trajectory, excess_buyback_percentage = create_sidebar_config()
+    # Create tabs
+    tab1, tab2 = st.tabs(["Static Vesting Configuration", "Simulation"])
     
-    # Add run button in sidebar
-    st.sidebar.markdown("---")
-    run_simulation = st.sidebar.button("Run Simulation", type="primary", use_container_width=True)
+    with tab1:
+        create_static_vesting_tab()
     
-    if run_simulation:
-        with st.spinner("🔄 Running tokenomics simulation..."):
-            # Initialize and run simulation
-            sim = TokenomicsSimulation(config, price_trajectory)
-            results = sim.run_simulation()
-            
-            # Analyze buyback constraints
-            constraint_analysis = sim.analyze_buyback_constraints()
-            
-            # Cache results in session state
-            st.session_state.results = results
-            st.session_state.constraint_analysis = constraint_analysis
-            st.session_state.has_results = True
-    
-    # Display results if available
-    if hasattr(st.session_state, 'has_results') and st.session_state.has_results:
-        st.success("✅ Simulation completed successfully!")
+    with tab2:
+        # Configuration sidebar
+        config, price_trajectory, excess_buyback_percentage = create_sidebar_config()
         
-        # NEW: Display buyback/burn constraint warnings
-        constraint_analysis = st.session_state.constraint_analysis
+        # Add run button in sidebar
+        st.sidebar.markdown("---")
+        run_simulation = st.sidebar.button("Run Simulation", type="primary", use_container_width=True)
         
-        if constraint_analysis['revenue_constrained']:
-            current_revenue = "${:,.0f}".format(constraint_analysis['current_revenue'])
-            max_revenue = "${:,.0f}".format(constraint_analysis['min_sustainable_revenue'])
-            st.warning("⚠️ **Revenue Constraint Warning**")
-            st.write(f"Your current monthly revenue ({current_revenue}) exceeds the maximum sustainable revenue ({max_revenue}) based on available circulating supply.")
-            st.write("**Impact:**")
-            st.write(f"- {constraint_analysis['total_buyback_violations']} months have buyback constraint violations")
-            st.write(f"- {constraint_analysis['total_burn_violations']} months have burn constraint violations")
-            st.write(f"- The bottleneck occurs at month {constraint_analysis['constraint_bottleneck_month']}")
-            st.write("**Recommendation:** Consider reducing monthly revenue or adjusting tokenomics parameters to ensure buybacks and burns don't exceed available circulating supply.")
+        if run_simulation:
+            with st.spinner("🔄 Running tokenomics simulation..."):
+                # Get static vesting data from session state if available
+                if 'static_vesting_data' in st.session_state:
+                    config.static_vesting_data = st.session_state.static_vesting_data
+                    config.use_custom_static_vesting = True
+                
+                # Initialize and run simulation
+                sim = TokenomicsSimulation(config, price_trajectory)
+                results = sim.run_simulation()
+                
+                # Analyze buyback constraints
+                constraint_analysis = sim.analyze_buyback_constraints()
+                
+                # Cache results in session state
+                st.session_state.results = results
+                st.session_state.constraint_analysis = constraint_analysis
+                st.session_state.has_results = True
+        
+        # Display results if available
+        if hasattr(st.session_state, 'has_results') and st.session_state.has_results:
+            st.success("✅ Simulation completed successfully!")
             
-            # NEW: Buy pressure analysis
-            buy_pressure = constraint_analysis['buy_pressure_metrics']
-            st.write("**Buy Pressure Analysis:**")
-            st.write(f"- Average buyback impact: {buy_pressure['avg_buyback_pct_supply']:.2f}% of circulating supply")
-            st.write(f"- Peak buyback impact: {buy_pressure['max_buyback_pct_supply']:.2f}% of circulating supply")
-            st.write(f"- Total buyback volume: ${buy_pressure['total_buyback_usd']/1e6:.1f}M USD over {len(st.session_state.results['months'])} months")
-            st.write(f"- Buyback efficiency: {buy_pressure['avg_buyback_efficiency']:.2f} tokens per USD")
-        elif constraint_analysis['total_buyback_violations'] > 0 or constraint_analysis['total_burn_violations'] > 0:
-            max_revenue = "${:,.0f}".format(constraint_analysis['min_sustainable_revenue'])
-            st.info("ℹ️ **Constraint Analysis**")
-            st.write("Some months have constraint violations but revenue is within sustainable limits:")
-            st.write(f"- {constraint_analysis['total_buyback_violations']} months with buyback violations")
-            st.write(f"- {constraint_analysis['total_burn_violations']} months with burn violations")
-            st.write(f"- Maximum sustainable revenue: {max_revenue}")
+            # NEW: Display buyback/burn constraint warnings
+            constraint_analysis = st.session_state.constraint_analysis
             
-            # NEW: Buy pressure analysis
-            buy_pressure = constraint_analysis['buy_pressure_metrics']
-            st.write("**Buy Pressure Analysis:**")
-            st.write(f"- Average buyback impact: {buy_pressure['avg_buyback_pct_supply']:.2f}% of circulating supply")
-            st.write(f"- Peak buyback impact: {buy_pressure['max_buyback_pct_supply']:.2f}% of circulating supply")
-            st.write(f"- Total buyback volume: ${buy_pressure['total_buyback_usd']/1e6:.1f}M USD over {len(st.session_state.results['months'])} months")
-            st.write(f"- Buyback efficiency: {buy_pressure['avg_buyback_efficiency']:.2f} tokens per USD")
+            if constraint_analysis['revenue_constrained']:
+                current_revenue = "${:,.0f}".format(constraint_analysis['current_revenue'])
+                max_revenue = "${:,.0f}".format(constraint_analysis['min_sustainable_revenue'])
+                st.warning("⚠️ **Revenue Constraint Warning**")
+                st.write(f"Your current monthly revenue ({current_revenue}) exceeds the maximum sustainable revenue ({max_revenue}) based on available circulating supply.")
+                st.write("**Impact:**")
+                st.write(f"- {constraint_analysis['total_buyback_violations']} months have buyback constraint violations")
+                st.write(f"- {constraint_analysis['total_burn_violations']} months have burn constraint violations")
+                st.write(f"- The bottleneck occurs at month {constraint_analysis['constraint_bottleneck_month']}")
+                st.write("**Recommendation:** Consider reducing monthly revenue or adjusting tokenomics parameters to ensure buybacks and burns don't exceed available circulating supply.")
+                
+                # NEW: Buy pressure analysis
+                buy_pressure = constraint_analysis['buy_pressure_metrics']
+                st.write("**Buy Pressure Analysis:**")
+                st.write(f"- Average buyback impact: {buy_pressure['avg_buyback_pct_supply']:.2f}% of circulating supply")
+                st.write(f"- Peak buyback impact: {buy_pressure['max_buyback_pct_supply']:.2f}% of circulating supply")
+                st.write(f"- Total buyback volume: ${buy_pressure['total_buyback_usd']/1e6:.1f}M USD over {len(st.session_state.results['months'])} months")
+                st.write(f"- Buyback efficiency: {buy_pressure['avg_buyback_efficiency']:.2f} tokens per USD")
+            elif constraint_analysis['total_buyback_violations'] > 0 or constraint_analysis['total_burn_violations'] > 0:
+                max_revenue = "${:,.0f}".format(constraint_analysis['min_sustainable_revenue'])
+                st.info("ℹ️ **Constraint Analysis**")
+                st.write("Some months have constraint violations but revenue is within sustainable limits:")
+                st.write(f"- {constraint_analysis['total_buyback_violations']} months with buyback violations")
+                st.write(f"- {constraint_analysis['total_burn_violations']} months with burn violations")
+                st.write(f"- Maximum sustainable revenue: {max_revenue}")
+                
+                # NEW: Buy pressure analysis
+                buy_pressure = constraint_analysis['buy_pressure_metrics']
+                st.write("**Buy Pressure Analysis:**")
+                st.write(f"- Average buyback impact: {buy_pressure['avg_buyback_pct_supply']:.2f}% of circulating supply")
+                st.write(f"- Peak buyback impact: {buy_pressure['max_buyback_pct_supply']:.2f}% of circulating supply")
+                st.write(f"- Total buyback volume: ${buy_pressure['total_buyback_usd']/1e6:.1f}M USD over {len(st.session_state.results['months'])} months")
+                st.write(f"- Buyback efficiency: {buy_pressure['avg_buyback_efficiency']:.2f} tokens per USD")
+            else:
+                current_revenue = "${:,.0f}".format(constraint_analysis['current_revenue'])
+                max_revenue = "${:,.0f}".format(constraint_analysis['min_sustainable_revenue'])
+                st.success("✅ **No Constraint Violations**")
+                st.write(f"Your current revenue ({current_revenue}) is less than sustainable limits.")
+                st.write(f"Maximum sustainable revenue: {max_revenue}")
+                
+                # NEW: Buy pressure analysis
+                buy_pressure = constraint_analysis['buy_pressure_metrics']
+                st.write("**Buy Pressure Analysis:**")
+                st.write(f"- Average buyback impact: {buy_pressure['avg_buyback_pct_supply']:.2f}% of circulating supply")
+                st.write(f"- Peak buyback impact: {buy_pressure['max_buyback_pct_supply']:.2f}% of circulating supply")
+                st.write(f"- Total buyback volume: ${buy_pressure['total_buyback_usd']/1e6:.1f}M USD over {len(st.session_state.results['months'])} months")
+                st.write(f"- Buyback efficiency: {buy_pressure['avg_buyback_efficiency']:.2f} tokens per USD")
+            
+            # Show configuration summary
+            with st.expander("Current Configuration Summary", expanded=False):
+                results = st.session_state.results
+                config = results['config']
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.markdown("**General**")
+                    st.write(f"Duration: {config.simulation_months} months")
+                    st.write(f"Total Supply: {config.total_supply/1e9:.1f}B tokens")
+                    st.write(f"Price Model: {results['price_model']}")
+                
+                with col2:
+                    st.markdown("**Module Budgets**")
+                    st.write(f"Staking: {config.staking_budget_percentage*100:.1f}% ({config.total_supply*config.staking_budget_percentage/1e6:.0f}M tokens)")
+                    st.write(f"Participants: {config.participant_budget_percentage*100:.1f}% ({config.total_supply*config.participant_budget_percentage/1e6:.0f}M tokens)")
+                    st.write(f"Mining Reserve: {config.mining_reserve_percentage*100:.1f}% ({config.total_supply*config.mining_reserve_percentage/1e6:.0f}M tokens)")
+                    st.write(f"Testnet: {config.testnet_allocation_percentage*100:.1f}% ({config.total_supply*config.testnet_allocation_percentage/1e6:.0f}M tokens)")
+                    st.write(f"Monthly Revenue: ${config.mrr_usd:,.0f}")
+                
+                with col3:
+                    st.markdown("**Half-lives**")
+                    st.write(f"Staking: {config.staking_half_life_months:.0f} months")
+                    st.write(f"Participants: {config.participant_half_life_months:.0f} months")
+                    st.write(f"Testnet: {config.testnet_allocation_half_life_months:.0f} months")
+            
+            # Display charts
+            create_charts(st.session_state.results, excess_buyback_percentage)
+            
         else:
-            current_revenue = "${:,.0f}".format(constraint_analysis['current_revenue'])
-            max_revenue = "${:,.0f}".format(constraint_analysis['min_sustainable_revenue'])
-            st.success("✅ **No Constraint Violations**")
-            st.write(f"Your current revenue ({current_revenue}) is less than sustainable limits.")
-            st.write(f"Maximum sustainable revenue: {max_revenue}")
+            # Show getting started message
+            st.info("Configure parameters in the sidebar and click Run Simulation to begin analysis")
             
-            # NEW: Buy pressure analysis
-            buy_pressure = constraint_analysis['buy_pressure_metrics']
-            st.write("**Buy Pressure Analysis:**")
-            st.write(f"- Average buyback impact: {buy_pressure['avg_buyback_pct_supply']:.2f}% of circulating supply")
-            st.write(f"- Peak buyback impact: {buy_pressure['max_buyback_pct_supply']:.2f}% of circulating supply")
-            st.write(f"- Total buyback volume: ${buy_pressure['total_buyback_usd']/1e6:.1f}M USD over {len(st.session_state.results['months'])} months")
-            st.write(f"- Buyback efficiency: {buy_pressure['avg_buyback_efficiency']:.2f} tokens per USD")
-        
-        # Show configuration summary
-        with st.expander("Current Configuration Summary", expanded=False):
-            results = st.session_state.results
-            config = results['config']
+            # Show sample configuration tips
+            st.markdown("### Quick Start Tips")
             
-            col1, col2, col3 = st.columns(3)
+            col1, col2 = st.columns(2)
             
             with col1:
-                st.markdown("**General**")
-                st.write(f"Duration: {config.simulation_months} months")
-                st.write(f"Total Supply: {config.total_supply/1e9:.1f}B tokens")
-                st.write(f"Price Model: {results['price_model']}")
+                st.markdown("""
+                **For High Growth Scenarios:**
+                - Set exponential price growth (3-5% monthly)
+                - Shorter half-lives for faster distribution
+                """)
             
             with col2:
-                st.markdown("**Module Budgets**")
-                st.write(f"Staking: {config.staking_budget_percentage*100:.1f}% ({config.total_supply*config.staking_budget_percentage/1e6:.0f}M tokens)")
-                st.write(f"Participants: {config.participant_budget_percentage*100:.1f}% ({config.total_supply*config.participant_budget_percentage/1e6:.0f}M tokens)")
-                st.write(f"Mining Reserve: {config.mining_reserve_percentage*100:.1f}% ({config.total_supply*config.mining_reserve_percentage/1e6:.0f}M tokens)")
-                st.write(f"Testnet: {config.testnet_allocation_percentage*100:.1f}% ({config.total_supply*config.testnet_allocation_percentage/1e6:.0f}M tokens)")
-                st.write(f"Monthly Revenue: ${config.mrr_usd:,.0f}")
-            
-            with col3:
-                st.markdown("**Half-lives**")
-                st.write(f"Staking: {config.staking_half_life_months:.0f} months")
-                st.write(f"Participants: {config.participant_half_life_months:.0f} months")
-                st.write(f"Testnet: {config.testnet_allocation_half_life_months:.0f} months")
-        
-        # Display charts
-        create_charts(st.session_state.results, excess_buyback_percentage)
-        
-    else:
-        # Show getting started message
-        st.info("Configure parameters in the sidebar and click Run Simulation to begin analysis")
-        
-        # Show sample configuration tips
-        st.markdown("### Quick Start Tips")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("""
-            **For High Growth Scenarios:**
-            - Set exponential price growth (3-5% monthly)
-            - Shorter half-lives for faster distribution
-            """)
-        
-        with col2:
-            st.markdown("""
-            **For Conservative Analysis:**
-            - Use constant or linear price growth
-            - Longer half-lives for sustained emissions
-            """)
+                st.markdown("""
+                **For Conservative Analysis:**
+                - Use constant or linear price growth
+                - Longer half-lives for sustained emissions
+                """)
 
 if __name__ == "__main__":
     main()
