@@ -261,7 +261,8 @@ def create_sidebar_config() -> tuple[SimulationConfig, object, float]:
         st.caption(f"Total testnet budget: {testnet_allocation_total_budget/1e6:.0f}M tokens")
         st.caption(f"Initial monthly emission: {initial_monthly_emission/1e6:.1f}M tokens")
     
-    # Remove static vesting configuration from sidebar - will be in separate tab
+    # Remove static vesting extension configuration from sidebar - now only in static vesting tab
+    # (Removed the st.sidebar.expander for Static Vesting Extension)
     static_vesting_data = None
     use_custom_static_vesting = False
     
@@ -293,7 +294,11 @@ def create_sidebar_config() -> tuple[SimulationConfig, object, float]:
         unlock_percentages=unlock_percentages,
         staking_percent=staking_percent,
         static_vesting_data=static_vesting_data,
-        use_custom_static_vesting=use_custom_static_vesting
+        use_custom_static_vesting=use_custom_static_vesting,
+        extend_builder_rpgf=False, # Always False here
+        builder_rpgf_quarterly_growth=0, # Always 0 here
+        builder_rpgf_max_cap=0, # Always 0 here
+        # max_quarters removed
     )
     
     return config, price_trajectory, excess_buyback_percentage
@@ -338,36 +343,6 @@ def create_charts(results: dict, excess_buyback_percentage: float = 1.0) -> None
             "Final FDV",
             f"${results['config'].total_supply * results['prices'][final_month] / 1e6:.0f}M"
         )
-    
-    # # NEW: Buy pressure metrics row
-    # if hasattr(st.session_state, 'constraint_analysis'):
-    #     buy_pressure = st.session_state.constraint_analysis['buy_pressure_metrics']
-        
-    #     col1, col2, col3, col4 = st.columns(4)
-        
-    #     with col1:
-    #         st.metric(
-    #             "Avg Buyback Impact",
-    #             f"{buy_pressure['avg_buyback_pct_supply']:.2f}% of supply"
-    #         )
-        
-    #     with col2:
-    #         st.metric(
-    #             "Peak Buyback Impact", 
-    #             f"{buy_pressure['max_buyback_pct_supply']:.2f}% of supply"
-    #         )
-        
-    #     with col3:
-    #         st.metric(
-    #             "Total Buyback Volume",
-    #             f"${buy_pressure['total_buyback_usd']/1e6:.1f}M USD"
-    #         )
-        
-    #     with col4:
-    #         st.metric(
-    #             "Buyback Efficiency",
-    #             f"{buy_pressure['avg_buyback_efficiency']:.1f} tokens/USD"
-    #         )
     
     # Token Supply Breakdown Over Time plot
     st.subheader("Token Supply Breakdown Over Time")
@@ -954,6 +929,73 @@ def create_static_vesting_tab():
     if 'static_vesting_data' not in st.session_state:
         st.session_state.static_vesting_data = default_data.copy()
     
+    # Extension configuration section
+    st.subheader("Builder/RPGF Extension Configuration")
+    st.markdown("""
+    **Configure how Builder and RPGF vesting schedules extend beyond Q20**
+    
+    By default, Builder and RPGF continue growing by 1.5M tokens per quarter after Q20 until reaching their caps.
+    """)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        extend_builder_rpgf = st.checkbox(
+            "Extend Builder/RPGF Beyond Q20",
+            value=True,
+            help="Enable to extend Builder and RPGF vesting schedules beyond Q20 with continued growth.",
+            key="tab_extend_builder_rpgf"
+        )
+        
+        if extend_builder_rpgf:
+            builder_rpgf_quarterly_growth = st.number_input(
+                "Quarterly Growth (tokens)",
+                min_value=100000, max_value=5000000, value=1500000, step=100000,
+                help="Quarterly growth rate for Builder and RPGF after Q20."
+            )
+            
+            builder_rpgf_max_cap = st.number_input(
+                "Maximum Cap (tokens)",
+                min_value=30000000, max_value=100000000, value=60000000, step=1000000,
+                help="Maximum cap for Builder and RPGF vesting schedules."
+            )
+        else:
+            builder_rpgf_quarterly_growth = 1500000
+            builder_rpgf_max_cap = 60000000
+    
+    with col2:
+        if extend_builder_rpgf:
+            last_value = 30000000
+            quarters_needed = int(np.ceil((builder_rpgf_max_cap - last_value) / builder_rpgf_quarterly_growth))
+            st.metric(
+                "Quarters to Cap",
+                quarters_needed
+            )
+            st.metric(
+                "Final Builder/RPGF",
+                f"{builder_rpgf_max_cap/1e6:.1f}M tokens"
+            )
+        else:
+            st.info("Builder and RPGF will stop at Q20 (30M tokens each)")
+    
+    # Save extension configuration to session state
+    st.session_state.extend_builder_rpgf = extend_builder_rpgf
+    st.session_state.builder_rpgf_quarterly_growth = builder_rpgf_quarterly_growth
+    st.session_state.builder_rpgf_max_cap = builder_rpgf_max_cap
+    
+    # Generate extended data based on configuration
+    simulation_months = 120  # or get from config if available
+    if extend_builder_rpgf:
+        extended_data = SimulationConfig.get_extended_static_vesting_data(
+            extend_builder_rpgf=True,
+            builder_rpgf_quarterly_growth=builder_rpgf_quarterly_growth,
+            builder_rpgf_max_cap=builder_rpgf_max_cap,
+            simulation_months=simulation_months
+        )
+        display_data = extended_data
+    else:
+        display_data = default_data
+    
     # Display current data summary
     st.subheader("Static Vesting Summary")
     col1, col2 = st.columns(2)
@@ -961,9 +1003,9 @@ def create_static_vesting_tab():
     with col1:
         st.markdown("**Allocation by Category:**")
         total_by_category = {}
-        for key in default_data.keys():
+        for key in display_data.keys():
             if key != 'Quarter':
-                total_by_category[key] = st.session_state.static_vesting_data[key][-1] / 1e6  # Convert to millions
+                total_by_category[key] = display_data[key][-1] / 1e6  # Convert to millions
         
         for category, total in total_by_category.items():
             st.caption(f"{category}: {total:.0f}M tokens")
@@ -992,11 +1034,11 @@ def create_static_vesting_tab():
     
     # Create DataFrame for editing with formatted numbers
     df_data = {}
-    for key in default_data.keys():
+    for key in display_data.keys():
         if key == 'Quarter':
-            df_data[key] = st.session_state.static_vesting_data[key]
+            df_data[key] = display_data[key]
         else:
-            df_data[key] = [f"{val:,}" for val in st.session_state.static_vesting_data[key]]
+            df_data[key] = [f"{val:,}" for val in display_data[key]]
     
     vesting_df = pd.DataFrame(df_data)
     
@@ -1013,7 +1055,7 @@ def create_static_vesting_tab():
         edited_data = {}
         edited_data['Quarter'] = [int(q) for q in edited_df['Quarter']]
         
-        for key in default_data.keys():
+        for key in display_data.keys():
             if key != 'Quarter':
                 # Convert comma-separated strings back to integers
                 edited_data[key] = []
@@ -1049,13 +1091,13 @@ def create_static_vesting_tab():
     
     # Create a simple visualization of the vesting schedules
     viz_data = []
-    for i, quarter in enumerate(st.session_state.static_vesting_data['Quarter']):
-        for key in default_data.keys():
+    for i, quarter in enumerate(display_data['Quarter']):
+        for key in display_data.keys():
             if key != 'Quarter':
                 viz_data.append({
                     'Quarter': quarter,
                     'Category': key,
-                    'Tokens (Millions)': st.session_state.static_vesting_data[key][i] / 1e6
+                    'Tokens (Millions)': display_data[key][i] / 1e6
                 })
     
     viz_df = pd.DataFrame(viz_data)
@@ -1110,6 +1152,13 @@ def main():
                 if 'static_vesting_data' in st.session_state:
                     config.static_vesting_data = st.session_state.static_vesting_data
                     config.use_custom_static_vesting = True
+                
+                # Get extension configuration from session state if available
+                if 'extend_builder_rpgf' in st.session_state:
+                    config.extend_builder_rpgf = st.session_state.extend_builder_rpgf
+                    config.builder_rpgf_quarterly_growth = st.session_state.builder_rpgf_quarterly_growth
+                    config.builder_rpgf_max_cap = st.session_state.builder_rpgf_max_cap
+                    # max_quarters removed
                 
                 # Initialize and run simulation
                 sim = TokenomicsSimulation(config, price_trajectory)

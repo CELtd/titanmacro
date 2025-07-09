@@ -20,7 +20,7 @@ class SimulationConfig:
     
     # General parameters
     total_supply: int = 2_000_000_000  # 2B tokens
-    simulation_months: int = 60  # 5 years default
+    simulation_months: int = 120  # 10 years
     
     # Module 1 - Revenue Buybacks
     mrr_usd: float = 100_000  # Monthly recurring revenue in USD
@@ -52,6 +52,12 @@ class SimulationConfig:
     # Static Vesting Configuration
     static_vesting_data: Dict[str, List[int]] = None  # Custom static vesting data
     use_custom_static_vesting: bool = False  # Whether to use custom data or default
+    
+    # Static Vesting Extension Configuration
+    extend_builder_rpgf: bool = True  # Whether to extend Builder and RPGF beyond Q20
+    builder_rpgf_quarterly_growth: int = 1500000  # Quarterly growth rate for Builder/RPGF (1.5M)
+    builder_rpgf_max_cap: int = 60000000  # Maximum cap for Builder/RPGF (60M)
+    # max_quarters: int = 40  # REMOVED
     
     def __post_init__(self):
         """Set default milestone values if not provided and validate allocations"""
@@ -111,7 +117,7 @@ class SimulationConfig:
     
     @staticmethod
     def get_default_static_vesting_data() -> Dict[str, List[int]]:
-        """Get the default static vesting data structure"""
+        """Get the default static vesting data structure (base data up to Q20)"""
         return {
             'Quarter': [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20],
             'Titan_Labs': [8333333,33333333,58333333,83333333,108333333,133333333,158333333,183333333,208333333,233333333,253333333,283333333,308333333,333333333,358333333,383333333,400000000,400000000,400000000,400000000,400000000],
@@ -124,6 +130,55 @@ class SimulationConfig:
             'Builder': [0,1500000,3000000,4500000,6000000,7500000,9000000,10500000,12000000,13500000,15000000,16500000,18000000,19500000,21000000,22500000,24000000,25500000,27000000,28500000,30000000],
             'RPGF': [0,1500000,3000000,4500000,6000000,7500000,9000000,10500000,12000000,13500000,15000000,16500000,18000000,19500000,21000000,22500000,24000000,25500000,27000000,28500000,30000000]
         }
+    
+    @staticmethod
+    def get_extended_static_vesting_data(extend_builder_rpgf: bool = True, 
+                                        builder_rpgf_quarterly_growth: int = 1500000,
+                                        builder_rpgf_max_cap: int = 60000000,
+                                        simulation_months: int = 60) -> Dict[str, List[int]]:
+        """
+        Get extended static vesting data with configurable Builder/RPGF extension
+        Args:
+            extend_builder_rpgf: Whether to extend Builder and RPGF beyond Q20
+            builder_rpgf_quarterly_growth: Quarterly growth rate for Builder/RPGF
+            builder_rpgf_max_cap: Maximum cap for Builder/RPGF
+            simulation_months: Number of months in the simulation (for alignment)
+        Returns:
+            Dictionary containing extended static vesting data
+        """
+        base_data = SimulationConfig.get_default_static_vesting_data()
+        # Determine how many quarters are needed to reach the cap
+        if extend_builder_rpgf:
+            last_value = base_data['Builder'][-1]
+            quarters_needed = int(np.ceil((builder_rpgf_max_cap - last_value) / builder_rpgf_quarterly_growth))
+            max_quarter = 20 + quarters_needed
+        else:
+            max_quarter = len(base_data['Quarter']) - 1
+        # Optionally, align with simulation duration (in months)
+        max_quarter = max(max_quarter, (simulation_months - 1) // 3)
+        quarters = list(range(max_quarter + 1))
+        data = {'Quarter': quarters}
+        # Extend each bucket
+        for bucket in ['Titan_Labs', 'Titan_Foundation', 'Seed_Fundraising', 'SeriesA_Fundraising', 'Ecosystem', 'Testnet', 'Market_Making']:
+            last_value = base_data[bucket][-1]
+            if extend_builder_rpgf:
+                data[bucket] = base_data[bucket] + [last_value] * (max_quarter - 20)
+            else:
+                data[bucket] = base_data[bucket]
+        # Handle Builder and RPGF
+        for bucket in ['Builder', 'RPGF']:
+            if extend_builder_rpgf:
+                extended_values = base_data[bucket].copy()
+                current_value = base_data[bucket][-1]
+                for quarter in range(21, max_quarter + 1):
+                    if current_value < builder_rpgf_max_cap:
+                        current_value = min(current_value + builder_rpgf_quarterly_growth, builder_rpgf_max_cap)
+                    # After cap is reached, just keep the cap value
+                    extended_values.append(current_value)
+                data[bucket] = extended_values
+            else:
+                data[bucket] = base_data[bucket]
+        return data
     
     @staticmethod
     def validate_static_vesting_data(data: Dict[str, List[int]]) -> bool:
@@ -279,7 +334,9 @@ class TokenomicsSimulation:
         
         # Use custom static vesting data if provided, otherwise use default
         if self.config.use_custom_static_vesting and self.config.static_vesting_data is not None:
-            base_data = self.config.static_vesting_data
+            # If custom data is provided, use it directly without further extension
+            # The custom data should already be properly extended if needed
+            return pd.DataFrame(self.config.static_vesting_data)
         else:
             base_data = self.config.get_default_static_vesting_data()
         
@@ -288,12 +345,15 @@ class TokenomicsSimulation:
         # Total Supply: 2,000,000,000
         # Total Static Percentage: 57%
         
-        # Calculate how many more quarters we need
-        # Builder and RPGF need to reach 60,000,000 from 30,000,000
-        # They increase by 1,500,000 per quarter
-        # Additional quarters needed: (60,000,000 - 30,000,000) / 1,500,000 = 20 quarters
-        # So they will reach 60,000,000 at Q40
-        max_quarter = 40
+        # Calculate how many quarters we need based on configuration
+        if self.config.extend_builder_rpgf:
+            # Calculate quarters needed to reach the cap, similar to get_extended_static_vesting_data
+            last_value = base_data['Builder'][-1]  # 30,000,000 at Q20
+            quarters_needed = int(np.ceil((self.config.builder_rpgf_max_cap - last_value) / self.config.builder_rpgf_quarterly_growth))
+            max_quarter = 20 + quarters_needed
+        else:
+            # If not extending, use the original data length
+            max_quarter = len(base_data['Quarter']) - 1
         
         # Extend quarters list
         quarters = list(range(max_quarter + 1))
@@ -301,24 +361,35 @@ class TokenomicsSimulation:
         # Initialize extended data
         data = {'Quarter': quarters}
         
-        # Extend each bucket
+        # Extend each bucket to ensure all have the same length
         for bucket in ['Titan_Labs', 'Titan_Foundation', 'Seed_Fundraising', 'SeriesA_Fundraising', 'Ecosystem', 'Testnet', 'Market_Making']:
             # These buckets are already at their maximum values, so extend with the last value
             last_value = base_data[bucket][-1]
-            data[bucket] = base_data[bucket] + [last_value] * (max_quarter - 20)
+            if max_quarter > 20:  # Only extend if we need more quarters than the base data
+                data[bucket] = base_data[bucket] + [last_value] * (max_quarter - 20)
+            else:
+                data[bucket] = base_data[bucket]
         
-        # Extend Builder and RPGF with continued growth
+        # Handle Builder and RPGF based on configuration
         for bucket in ['Builder', 'RPGF']:
-            extended_values = base_data[bucket].copy()
-            current_value = base_data[bucket][-1]  # 30,000,000 at Q20
-            
-            for quarter in range(21, max_quarter + 1):
-                current_value += 1500000
-                if current_value > 60000000:  # Cap at 60,000,000
-                    current_value = 60000000
-                extended_values.append(current_value)
-            
-            data[bucket] = extended_values
+            if self.config.extend_builder_rpgf:
+                # Extend Builder and RPGF with continued growth
+                extended_values = base_data[bucket].copy()
+                current_value = base_data[bucket][-1]  # 30,000,000 at Q20
+                
+                for quarter in range(21, max_quarter + 1):
+                    current_value += self.config.builder_rpgf_quarterly_growth
+                    if current_value > self.config.builder_rpgf_max_cap:  # Cap at configured maximum
+                        current_value = self.config.builder_rpgf_max_cap
+                    extended_values.append(current_value)
+                
+                data[bucket] = extended_values
+            else:
+                # Use original data, but extend with last value if needed to match length
+                if max_quarter > 20:
+                    data[bucket] = base_data[bucket] + [base_data[bucket][-1]] * (max_quarter - 20)
+                else:
+                    data[bucket] = base_data[bucket]
         
         return pd.DataFrame(data)
     
